@@ -22,7 +22,11 @@ UPLOADS = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
 PASSWORD = os.environ.get("APP_PASSWORD", "")
 TMDB_KEY = os.environ.get("TMDB_KEY", "").strip()
 
-VIDEO_EXT = {".mp4", ".m4v", ".mov", ".mkv"}
+# Что айфон умеет играть сам
+VIDEO_EXT = {".mp4", ".m4v", ".mov"}
+# Что сервер переделывает в mp4 после загрузки
+CONVERT_EXT = {".mkv", ".avi", ".wmv", ".flv", ".webm", ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".vob", ".3gp", ".divx", ".ogv"}
+UPLOAD_EXT = VIDEO_EXT | CONVERT_EXT
 MIME = {
     ".mp4": "video/mp4",
     ".m4v": "video/x-m4v",
@@ -125,6 +129,8 @@ def collect_files(show_dir: Path):
     out = []
     for f in show_dir.rglob("*"):
         if not f.is_file() or f.suffix.lower() not in VIDEO_EXT:
+            continue
+        if f.stat().st_size == 0:  # место под файл, который ещё конвертируется
             continue
         _, s, e = parse_name(f.name)
         if s is None:
@@ -408,8 +414,8 @@ def upload_offset(name: str, total: int):
 @app.put("/api/upload/chunk", dependencies=[Depends(auth)])
 async def upload_chunk(request: Request, name: str, total: int, offset: int,
                        show: str = "", season: int = 0, episode: int = 0):
-    if Path(name).suffix.lower() not in VIDEO_EXT:
-        raise HTTPException(400, "Формат не поддерживается: нужен mp4, m4v, mov или mkv")
+    if Path(name).suffix.lower() not in UPLOAD_EXT:
+        raise HTTPException(400, "Этот формат не поддерживается")
     if total <= 0:
         raise HTTPException(400, "Пустой файл")
     part = _upload_part(name, total)
@@ -427,6 +433,10 @@ async def upload_chunk(request: Request, name: str, total: int, offset: int,
         raise HTTPException(400, "Размер файла не совпал, начни загрузку заново")
     if new_size < total:
         return {"offset": new_size, "done": False}
+    if Path(name).suffix.lower() in CONVERT_EXT:
+        job = queue_conversion(part, name, show, season, episode)
+        return {"offset": new_size, "done": True, "converting": True, "jobId": job["id"],
+                "path": job["dest"]}
     dest = place(name, show, season, episode)
     shutil.move(str(part), dest)
     refresh_meta_async()
@@ -724,4 +734,211 @@ def archive_cancel(job_id: str):
         job["cancel"] = True
     else:
         _jobs.pop(job_id, None)
+    return {"ok": True}
+
+
+
+# ---------- конвертация в mp4 (avi, mkv и прочее) ----------
+
+import subprocess as _sp
+
+CONVERT_DIR = UPLOADS / "convert"
+CONVERT_DIR.mkdir(parents=True, exist_ok=True)
+TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+_conv_jobs: dict = {}
+_conv_queue: "_queue.Queue[str]" = _queue.Queue()
+
+
+def _conv_public(job: dict) -> dict:
+    return {k: job.get(k) for k in ("id", "name", "dest", "state", "progress", "error")}
+
+
+def _save_conv(job: dict):
+    (CONVERT_DIR / f"{job['id']}.json").write_text(
+        json.dumps({k: job[k] for k in ("id", "name", "src", "dest", "createdAt")}, ensure_ascii=False))
+
+
+def queue_conversion(part: Path, name: str, show: str, season: int, episode: int) -> dict:
+    jid = _uuid.uuid4().hex[:12]
+    src = CONVERT_DIR / f"{jid}{Path(name).suffix.lower()}"
+    shutil.move(str(part), src)
+    # Место в библиотеке выбираем сразу, чтобы два файла не получили одно имя
+    dest = place(Path(name).stem + ".mp4", show, season, episode)
+    dest.touch()
+    job = {"id": jid, "name": name, "src": str(src), "dest": dest.relative_to(MEDIA).as_posix(),
+           "state": "queued", "progress": 0.0, "error": None, "cancel": False, "proc": None,
+           "createdAt": time.time(), "finishedAt": None}
+    _save_conv(job)
+    _conv_jobs[jid] = job
+    _conv_queue.put(jid)
+    return job
+
+
+def _probe(path: Path) -> dict:
+    out = _sp.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
+                  capture_output=True, text=True, timeout=120)
+    if out.returncode != 0:
+        raise RuntimeError("Файл не читается как видео")
+    return json.loads(out.stdout)
+
+
+def _ffmpeg_args(src: Path, out: Path, info: dict, with_subs: bool) -> list:
+    streams = info.get("streams", [])
+    video = [st for st in streams if st.get("codec_type") == "video" and not st.get("disposition", {}).get("attached_pic")]
+    audio = [st for st in streams if st.get("codec_type") == "audio"]
+    subs = [st for st in streams if st.get("codec_type") == "subtitle" and st.get("codec_name") in TEXT_SUBS]
+    if not video:
+        raise RuntimeError("В файле нет видео")
+    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i", str(src), "-map", f"0:{video[0]['index']}"]
+    for a in audio:
+        args += ["-map", f"0:{a['index']}"]
+    if with_subs:
+        for t in subs:
+            args += ["-map", f"0:{t['index']}"]
+    vcodec = video[0].get("codec_name")
+    pix = video[0].get("pix_fmt", "")
+    if vcodec == "h264" and pix in ("yuv420p", "yuvj420p"):
+        args += ["-c:v", "copy"]
+    elif vcodec == "hevc":
+        args += ["-c:v", "copy", "-tag:v", "hvc1"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    for i, a in enumerate(audio):
+        if a.get("codec_name") == "aac":
+            args += [f"-c:a:{i}", "copy"]
+        else:
+            args += [f"-c:a:{i}", "aac", f"-b:a:{i}", "192k", f"-ac:a:{i}", "2"]
+    if with_subs and subs:
+        args += ["-c:s", "mov_text"]
+    args += ["-map_metadata", "0", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(out)]
+    return args
+
+
+def _run_ffmpeg(job: dict, args: list, duration: float) -> int:
+    proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE, text=True)
+    job["proc"] = proc
+    err_tail: list = []
+
+    def read_err():
+        for line in proc.stderr:
+            err_tail.append(line.strip())
+            del err_tail[:-15]
+
+    t = threading.Thread(target=read_err, daemon=True)
+    t.start()
+    for line in proc.stdout:
+        if job["cancel"]:
+            proc.kill()
+            break
+        key, _, value = line.strip().partition("=")
+        if key in ("out_time_us", "out_time_ms") and value.isdigit() and duration > 0:
+            job["progress"] = min(0.99, int(value) / 1e6 / duration)
+    rc = proc.wait()
+    t.join(timeout=5)
+    job["proc"] = None
+    job["stderr"] = "\n".join(err_tail)
+    return rc
+
+
+def _convert(job: dict):
+    src = Path(job["src"])
+    dest = MEDIA / job["dest"]
+    out = CONVERT_DIR / f"{job['id']}.out.mp4"
+    job["state"] = "converting"
+    try:
+        info = _probe(src)
+        duration = float(info.get("format", {}).get("duration") or 0)
+        if shutil.disk_usage(CONVERT_DIR).free < src.stat().st_size + 300 * 1024 * 1024:
+            raise RuntimeError("На сервере не хватает места для конвертации")
+        rc = _run_ffmpeg(job, _ffmpeg_args(src, out, info, with_subs=True), duration)
+        if rc != 0 and not job["cancel"]:
+            # Некоторые субтитры в mp4 не переносятся, пробуем без них
+            rc = _run_ffmpeg(job, _ffmpeg_args(src, out, info, with_subs=False), duration)
+        if job["cancel"]:
+            raise _Cancelled()
+        if rc != 0:
+            raise RuntimeError("ffmpeg не смог переделать файл: " + job.get("stderr", "")[-300:])
+        shutil.move(str(out), dest)
+        src.unlink(missing_ok=True)
+        (CONVERT_DIR / f"{job['id']}.json").unlink(missing_ok=True)
+        job["state"], job["progress"] = "done", 1.0
+        refresh_meta_async()
+    except _Cancelled:
+        job["state"] = "cancelled"
+        _drop_conversion(job)
+    except Exception as ex:
+        job["state"] = "error"
+        job["error"] = str(ex)[:400]
+        _drop_conversion(job)
+    finally:
+        job["finishedAt"] = time.time()
+        out.unlink(missing_ok=True)
+
+
+def _drop_conversion(job: dict):
+    Path(job["src"]).unlink(missing_ok=True)
+    (CONVERT_DIR / f"{job['id']}.json").unlink(missing_ok=True)
+    dest = MEDIA / job["dest"]
+    if dest.exists() and dest.stat().st_size == 0:
+        dest.unlink()
+        parent = dest.parent
+        while parent != MEDIA and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+
+
+def _conv_worker():
+    while True:
+        job = _conv_jobs.get(_conv_queue.get())
+        if job and job["state"] == "queued":
+            _convert(job)
+
+
+def _resume_conversions():
+    """После перезапуска сервера продолжаем незаконченные конвертации."""
+    for meta in sorted(CONVERT_DIR.glob("*.json")):
+        try:
+            data = json.loads(meta.read_text())
+        except Exception:
+            continue
+        if not Path(data["src"]).exists():
+            meta.unlink(missing_ok=True)
+            continue
+        job = {**data, "state": "queued", "progress": 0.0, "error": None, "cancel": False,
+               "proc": None, "finishedAt": None}
+        (MEDIA / job["dest"]).parent.mkdir(parents=True, exist_ok=True)
+        (MEDIA / job["dest"]).touch()
+        _conv_jobs[job["id"]] = job
+        _conv_queue.put(job["id"])
+
+
+_resume_conversions()
+threading.Thread(target=_conv_worker, daemon=True).start()
+
+
+@app.get("/api/convert/jobs", dependencies=[Depends(auth)])
+def convert_jobs():
+    hour_ago = time.time() - 3600
+    for jid in [j for j, job in _conv_jobs.items() if job["finishedAt"] and job["finishedAt"] < hour_ago]:
+        _conv_jobs.pop(jid, None)
+    jobs = sorted(_conv_jobs.values(), key=lambda j: j["createdAt"])
+    return {"jobs": [_conv_public(j) for j in jobs]}
+
+
+@app.delete("/api/convert/jobs/{job_id}", dependencies=[Depends(auth)])
+def convert_cancel(job_id: str):
+    job = _conv_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Нет такой конвертации")
+    if job["state"] == "queued":
+        job["state"] = "cancelled"
+        job["finishedAt"] = time.time()
+        _drop_conversion(job)
+    elif job["state"] == "converting":
+        job["cancel"] = True
+        if job.get("proc"):
+            job["proc"].kill()
+    else:
+        _conv_jobs.pop(job_id, None)
     return {"ok": True}

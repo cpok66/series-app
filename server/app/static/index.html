@@ -86,12 +86,13 @@
 
     <label class="drop" id="drop">
       <strong>Перетащи сюда файлы серий</strong>
-      <span class="muted">или нажми, чтобы выбрать (на телефоне — из «Файлов» или «Фото»). Подходят mp4, m4v, mov, mkv</span>
-      <input id="fileInput" type="file" multiple accept="video/*,.mp4,.m4v,.mov,.mkv">
+      <span class="muted">или нажми, чтобы выбрать (на телефоне — из «Файлов» или «Фото»). Подходят любые видео: mp4 и mov сразу, а avi, mkv и прочие сервер сам переделает в mp4</span>
+      <input id="fileInput" type="file" multiple accept="video/*,.mp4,.m4v,.mov,.mkv,.avi,.wmv,.flv,.webm,.ts,.m2ts,.mts,.mpg,.mpeg,.vob,.3gp,.divx,.ogv">
     </label>
 
     <p id="skipMsg" class="status err"></p>
     <div class="queue" id="queue"></div>
+    <div id="convList" class="queue"></div>
     <div class="actions" id="queueActions" hidden>
       <button class="primary" id="startBtn">Загрузить всё</button>
       <button id="clearBtn">Убрать загруженные</button>
@@ -138,6 +139,8 @@ async function enter() {
     const d = await api('/api/ping');
     $('login').classList.add('hidden'); $('main').classList.remove('hidden');
     setDisk(d.disk); loadLibrary();
+    if (!window.convTimer) window.convTimer = setInterval(pollConversions, 3000);
+    pollConversions();
   } catch (e) { if (e.message !== '401') showLogin('Сервер недоступен: ' + e.message); }
 }
 
@@ -166,12 +169,15 @@ function parseName(name) {
 }
 
 // ---------- очередь ----------
-const EXT_BY_TYPE = { 'video/quicktime': '.mov', 'video/mp4': '.mp4', 'video/x-m4v': '.m4v', 'video/x-matroska': '.mkv' };
+const EXT_BY_TYPE = { 'video/quicktime': '.mov', 'video/mp4': '.mp4', 'video/x-m4v': '.m4v', 'video/x-matroska': '.mkv',
+  'video/x-msvideo': '.avi', 'video/avi': '.avi', 'video/msvideo': '.avi', 'video/webm': '.webm', 'video/x-ms-wmv': '.wmv',
+  'video/mp2t': '.ts', 'video/mpeg': '.mpg', 'video/3gpp': '.3gp', 'video/x-flv': '.flv' };
+const VIDEO_RE = /\.(mp4|m4v|mov|mkv|avi|wmv|flv|webm|ts|m2ts|mts|mpg|mpeg|vob|3gp|divx|ogv)$/i;
 function addFiles(files) {
   const skipped = [];
   for (const f of files) {
     let name = f.name || 'video';
-    if (!/\.(mp4|m4v|mov|mkv)$/i.test(name)) {
+    if (!VIDEO_RE.test(name)) {
       // iOS иногда отдаёт видео из «Фото» без привычного расширения
       const ext = EXT_BY_TYPE[(f.type || '').toLowerCase()];
       if (!ext) { skipped.push(name); continue; }
@@ -182,7 +188,7 @@ function addFiles(files) {
     queue.push(it); renderItem(it);
   }
   $('skipMsg').textContent = skipped.length
-    ? 'Не подходит формат: ' + skipped.join(', ') + '. Нужны mp4, m4v, mov или mkv.' : '';
+    ? 'Не подходит формат: ' + skipped.join(', ') + '. Это не видео или очень редкий формат.' : '';
   $('queueActions').hidden = queue.length === 0;
 }
 
@@ -208,7 +214,7 @@ function renderItem(it) {
   it.el.querySelector('.bar > i').style.width = pct.toFixed(1) + '%';
   const st = it.el.querySelector('.status');
   st.textContent = it.msg; st.className = 'status' + (it.state === 'done' ? ' ok' : it.state === 'error' ? ' err' : '');
-  it.el.querySelectorAll('input').forEach(inp => inp.disabled = it.state === 'up' || it.state === 'done');
+  it.el.querySelectorAll('input').forEach(inp => inp.disabled = ['up', 'done', 'convert'].includes(it.state));
 }
 
 function putChunk(it, blob, offset) {
@@ -253,6 +259,11 @@ async function uploadItem(it) {
     try {
       const res = await putChunk(it, f.slice(offset, end), offset);
       offset = res.offset; retries = 0;
+      if (res.done && res.converting) {
+        it.state = 'convert'; it.jobId = res.jobId; it.sent = f.size;
+        it.msg = 'Загружено. Сервер переделывает в mp4, это может занять несколько минут…'; renderItem(it);
+        pollConversions(); return;
+      }
       if (res.done) { it.state = 'done'; it.sent = f.size; it.msg = 'Готово → ' + res.path; renderItem(it); return; }
     } catch (e) {
       if (e.status === 409) { offset = e.body.offset; continue; }
@@ -332,6 +343,43 @@ async function loadLibrary() {
   }
 }
 $('refreshBtn').onclick = loadLibrary;
+
+// ---------- конвертация на сервере ----------
+const seenDone = new Set();
+async function pollConversions() {
+  let jobs;
+  try { jobs = (await api('/api/convert/jobs')).jobs; } catch (e) { return; }
+  let finished = false;
+  for (const j of jobs) {
+    const it = queue.find(q => q.jobId === j.id);
+    if (it) {
+      if (j.state === 'converting') it.msg = `Переделываю в mp4: ${Math.round(j.progress * 100)}%`;
+      if (j.state === 'queued') it.msg = 'Загружено, ждёт очереди на конвертацию…';
+      if (j.state === 'done') { it.state = 'done'; it.msg = 'Готово → ' + j.dest; }
+      if (j.state === 'error') { it.state = 'error'; it.msg = 'Не получилось переделать: ' + (j.error || ''); }
+      if (j.state === 'cancelled') { it.state = 'error'; it.msg = 'Конвертация отменена'; }
+      renderItem(it);
+    }
+    if (j.state === 'done' && !seenDone.has(j.id)) { seenDone.add(j.id); finished = true; }
+  }
+  // Задачи, которых нет в очереди этой страницы (например, после перезагрузки)
+  const box = $('convList'); box.innerHTML = '';
+  for (const j of jobs) {
+    if (queue.some(q => q.jobId === j.id)) continue;
+    const el = document.createElement('div'); el.className = 'item';
+    const active = j.state === 'queued' || j.state === 'converting';
+    const text = { queued: 'ждёт конвертации', converting: `переделываю в mp4: ${Math.round(j.progress * 100)}%`,
+                   done: 'готово', error: 'ошибка: ' + (j.error || ''), cancelled: 'отменено' }[j.state] || j.state;
+    el.innerHTML = `<div class="top"><div class="name">${esc(j.name)}</div>
+      <button class="danger" style="padding:4px 10px;font-size:13px">${active ? 'Отменить' : 'Убрать'}</button></div>
+      <div class="status ${j.state === 'done' ? 'ok' : j.state === 'error' ? 'err' : ''}">${esc(text)}</div>`;
+    el.querySelector('button').onclick = async () => {
+      try { await api('/api/convert/jobs/' + j.id, { method: 'DELETE' }); pollConversions(); } catch (e) { alert(e.message); }
+    };
+    box.appendChild(el);
+  }
+  if (finished) loadLibrary();
+}
 
 if (password) enter(); else showLogin();
 </script>

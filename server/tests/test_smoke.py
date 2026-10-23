@@ -147,6 +147,82 @@ def test_archive():
     print("archive OK")
 
 
+def _wait_conversion(job_id):
+    import time
+    for _ in range(600):
+        jobs = {j["id"]: j for j in c.get("/api/convert/jobs", headers=H).json()["jobs"]}
+        if jobs[job_id]["state"] in ("done", "error", "cancelled"):
+            return jobs[job_id]
+        time.sleep(0.2)
+    raise AssertionError("конвертация зависла")
+
+
+def _upload(path, name):
+    data = Path(path).read_bytes()
+    r = c.put(f"/api/upload/chunk?name={name}&total={len(data)}&offset=0", content=data, headers=H)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _probe_streams(rel):
+    import json
+    import subprocess
+    out = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
+                          str(Path(os.environ["MEDIA_DIR"]) / rel)], capture_output=True, text=True, check=True)
+    return [(s["codec_type"], s["codec_name"]) for s in json.loads(out.stdout)["streams"]]
+
+
+def test_convert():
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        print("ffmpeg нет, пропускаю тест конвертации")
+        return
+    tmp = Path(tempfile.mkdtemp())
+    ff = ["ffmpeg", "-v", "error", "-y"]
+    # Типичный avi: mpeg4 (xvid) + mp3
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=25",
+                         "-f", "lavfi", "-i", "sine=duration=3", "-c:v", "mpeg4", "-c:a", "libmp3lame",
+                         str(tmp / "a.avi")], check=True)
+    # mkv: h264 + две озвучки + текстовые субтитры
+    (tmp / "s.srt").write_text("1\n00:00:00,500 --> 00:00:02,000\nПривет\n", encoding="utf-8")
+    subprocess.run(ff + ["-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=25",
+                         "-f", "lavfi", "-i", "sine=duration=3:frequency=300",
+                         "-f", "lavfi", "-i", "sine=duration=3:frequency=600", "-i", str(tmp / "s.srt"),
+                         "-map", "0", "-map", "1", "-map", "2", "-map", "3",
+                         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "ac3", "-c:s", "srt",
+                         str(tmp / "b.mkv")], check=True)
+
+    r = _upload(tmp / "a.avi", "Hannibal.S01E01.HDRip.avi")
+    assert r["converting"] and r["path"] == "Hannibal/Season 01/Hannibal.S01E01.HDRip.mp4", r
+    # пока идёт конвертация, пустой файл не должен попасть в библиотеку
+    lib = {s["title"]: s for s in c.get("/api/library", headers=H).json()["shows"]}
+    assert "Hannibal" not in lib or lib["Hannibal"]["seasons"][0]["episodes"][0]["size"] > 0
+    job = _wait_conversion(r["jobId"])
+    assert job["state"] == "done", job
+    assert _probe_streams(r["path"]) == [("video", "h264"), ("audio", "aac")]
+
+    r = _upload(tmp / "b.mkv", "Show.S02E03.mkv")
+    job = _wait_conversion(r["jobId"])
+    assert job["state"] == "done", job
+    streams = _probe_streams(r["path"])
+    assert streams == [("video", "h264"), ("audio", "aac"), ("audio", "aac"), ("subtitle", "mov_text")], streams
+
+    lib = {s["title"]: s for s in c.get("/api/library", headers=H).json()["shows"]}
+    ep = lib["Hannibal"]["seasons"][0]["episodes"][0]
+    assert ep["ext"] == "mp4" and ep["episode"] == 1 and ep["size"] > 0
+    assert lib["Show"]["seasons"][0]["number"] == 2
+
+    # битый файл: ошибка, без мусора в библиотеке
+    (tmp / "bad.avi").write_bytes(os.urandom(5000))
+    r = _upload(tmp / "bad.avi", "Broken.S01E01.avi")
+    assert _wait_conversion(r["jobId"])["state"] == "error"
+    assert "Broken" not in [s["title"] for s in c.get("/api/library", headers=H).json()["shows"]]
+    assert not (Path(os.environ["MEDIA_DIR"]) / "Broken").exists()
+    print("convert OK")
+
+
 if __name__ == "__main__":
     test_all()
     test_archive()
+    test_convert()

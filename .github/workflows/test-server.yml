@@ -16,7 +16,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -r server/requirements.txt
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -r server/requirements.txt
       - name: Smoke test
         run: python server/tests/test_smoke.py
       - name: Docker build
