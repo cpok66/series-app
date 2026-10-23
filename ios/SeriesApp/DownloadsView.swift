@@ -54,13 +54,16 @@ struct DownloadsView: View {
 
                 if store.downloaded.isEmpty && downloads.active.isEmpty {
                     Section {
-                        Text("Здесь будут серии, которые ты скачаешь. Их можно смотреть без интернета.")
+                        Text("Здесь будут серии, которые ты скачаешь. Их можно смотреть без интернета.\n\nВидео, которое уже есть на телефоне, можно добавить кнопкой «+» вверху слева: из «Файлов», без сервера.")
                             .foregroundStyle(.secondary)
                     }
                 }
             }
             .navigationTitle("Скачано")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    ImportButton()
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button(role: .destructive) {
