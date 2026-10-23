@@ -1,0 +1,65 @@
+name: Build iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project SeriesApp.xcodeproj \
+            -target SeriesApp \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Release-iphoneos/SeriesApp.app || { grep -E "error" build.log | head -50; exit 1; }
+
+      - name: Package IPA
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/SeriesApp.app Payload/
+          zip -qry SeriesApp.ipa Payload
+          ls -lh SeriesApp.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SeriesApp-ipa
+          path: ios/SeriesApp.ipa
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest ios/SeriesApp.ipa \
+            --target "${{ github.sha }}" \
+            --title "Сериалы — сборка ${{ github.run_number }}" \
+            --notes "Скачай SeriesApp.ipa и установи через SideStore (+ → выбрать файл)."
