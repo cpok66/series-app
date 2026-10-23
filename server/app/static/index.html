@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сериалы — сервер</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f232c; --line: #2a2f3a;
+    --text: #e8eaf0; --muted: #8b93a5; --accent: #ff7a3d; --ok: #3ccf8e; --err: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 17px; margin: 28px 0 12px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+                 border-radius: 10px; padding: 9px 14px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #3a4150; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1a0d05; font-weight: 600; }
+  button.danger { color: var(--err); }
+  button:disabled { opacity: .5; cursor: default; }
+  input { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+          padding: 8px 10px; font: inherit; min-width: 0; }
+  input:focus { outline: none; border-color: var(--accent); }
+  .disk { min-width: 220px; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .drop { margin-top: 20px; border: 2px dashed var(--line); border-radius: 14px; padding: 36px 16px;
+          text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--accent); background: rgba(255,122,61,.06); }
+  .drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  .queue { display: grid; gap: 10px; margin-top: 14px; }
+  .item { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .item .top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .item .name { font-weight: 600; word-break: break-all; }
+  .fields { display: grid; grid-template-columns: 1fr 90px 90px; gap: 8px; margin-top: 10px; }
+  .fields label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+  .status { font-size: 13px; margin-top: 8px; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); }
+  .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .show { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+  .show > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; gap: 12px; align-items: center; }
+  .show > summary::-webkit-details-marker { display: none; }
+  .show img { width: 40px; height: 60px; object-fit: cover; border-radius: 6px; background: var(--panel2); flex: none; }
+  .show .t { flex: 1; min-width: 0; }
+  .ep { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 14px; }
+  .ep span.n { color: var(--muted); width: 64px; flex: none; }
+  .ep span.title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ep button { padding: 4px 10px; font-size: 13px; }
+  .login { max-width: 360px; margin: 12vh auto 0; }
+  .login input { width: 100%; margin: 12px 0; }
+  .hidden { display: none !important; }
+  @media (max-width: 560px) { .fields { grid-template-columns: 1fr 1fr; } .fields label:first-child { grid-column: 1 / -1; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="login" class="login panel hidden">
+    <h1>Сериалы</h1>
+    <p class="muted">Введи пароль от сервера. Он был показан при установке.</p>
+    <form id="loginForm">
+      <input id="pw" type="password" placeholder="Пароль" autocomplete="current-password" required>
+      <button class="primary" style="width:100%">Войти</button>
+    </form>
+    <p id="loginErr" class="status err"></p>
+  </div>
+
+  <div id="main" class="hidden">
+    <header>
+      <div>
+        <h1>Загрузка серий</h1>
+        <div class="muted">Файлы раскладываются по сериалам и сезонам по имени, например <code>Show.Name.S01E05.mp4</code></div>
+      </div>
+      <div class="disk">
+        <div class="muted" id="diskText">Диск: …</div>
+        <div class="bar"><i id="diskBar"></i></div>
+      </div>
+    </header>
+
+    <label class="drop" id="drop">
+      <strong>Перетащи сюда файлы серий</strong>
+      <span class="muted">или нажми, чтобы выбрать. Подходят mp4, m4v, mov, mkv</span>
+      <input id="fileInput" type="file" multiple accept=".mp4,.m4v,.mov,.mkv,video/*" hidden>
+    </label>
+
+    <div class="queue" id="queue"></div>
+    <div class="actions" id="queueActions" hidden>
+      <button class="primary" id="startBtn">Загрузить всё</button>
+      <button id="clearBtn">Убрать загруженные</button>
+    </div>
+
+    <h2>На сервере <button id="refreshBtn" style="margin-left:8px;padding:4px 10px;font-size:13px">Обновить</button></h2>
+    <div id="library" class="muted">Загрузка…</div>
+
+    <p style="margin-top:40px"><button id="logoutBtn">Выйти</button></p>
+  </div>
+</div>
+
+<script>
+const CHUNK = 16 * 1024 * 1024;
+let password = '';
+try { password = localStorage.getItem('pw') || ''; } catch (e) {}
+const queue = [];
+let running = false;
+
+const $ = id => document.getElementById(id);
+const fmtBytes = b => {
+  if (!b) return '0 Б';
+  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i > 1 ? 1 : 0) + ' ' + u[i];
+};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + password } });
+  if (r.status === 401) { showLogin('Неверный пароль'); throw new Error('401'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.detail || ('Ошибка ' + r.status)), { status: r.status, body: data });
+  return data;
+}
+
+function showLogin(err) {
+  $('main').classList.add('hidden'); $('login').classList.remove('hidden');
+  $('loginErr').textContent = err || '';
+}
+
+async function enter() {
+  try {
+    const d = await api('/api/ping');
+    $('login').classList.add('hidden'); $('main').classList.remove('hidden');
+    setDisk(d.disk); loadLibrary();
+  } catch (e) { if (e.message !== '401') showLogin('Сервер недоступен: ' + e.message); }
+}
+
+$('loginForm').onsubmit = e => {
+  e.preventDefault(); password = $('pw').value.trim();
+  try { localStorage.setItem('pw', password); } catch (e) {}
+  enter();
+};
+$('logoutBtn').onclick = () => { try { localStorage.removeItem('pw'); } catch (e) {} password = ''; showLogin(); };
+
+function setDisk(d) {
+  if (!d) return;
+  $('diskText').textContent = `Диск: свободно ${fmtBytes(d.free)} из ${fmtBytes(d.total)}`;
+  $('diskBar').style.width = (100 * d.used / d.total).toFixed(1) + '%';
+}
+
+// ---------- разбор имени ----------
+function parseName(name) {
+  const stem = name.replace(/\.[^.]+$/, '');
+  const pats = [/^(.*?)[\s._\-\[\(]*s(\d{1,2})[\s._\-]*e(\d{1,3})/i, /^(.*?)[\s._\-\[\(]*(\d{1,2})x(\d{1,3})(?!\d)/i];
+  for (const p of pats) {
+    const m = stem.match(p);
+    if (m) return { show: m[1].replace(/[._]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s\-\[\]()]+|[\s\-\[\]()]+$/g, ''), season: +m[2], episode: +m[3] };
+  }
+  return { show: '', season: '', episode: '' };
+}
+
+// ---------- очередь ----------
+function addFiles(files) {
+  for (const f of files) {
+    if (!/\.(mp4|m4v|mov|mkv)$/i.test(f.name)) continue;
+    const p = parseName(f.name);
+    const it = { file: f, show: p.show, season: p.season, episode: p.episode, sent: 0, state: 'wait', msg: 'Ждёт загрузки' };
+    queue.push(it); renderItem(it);
+  }
+  $('queueActions').hidden = queue.length === 0;
+}
+
+function renderItem(it) {
+  if (!it.el) {
+    it.el = document.createElement('div'); it.el.className = 'item';
+    it.el.innerHTML = `
+      <div class="top"><div class="name">${esc(it.file.name)}</div><div class="muted">${fmtBytes(it.file.size)}</div></div>
+      <div class="fields">
+        <label>Сериал<input data-k="show" placeholder="Название"></label>
+        <label>Сезон<input data-k="season" type="number" min="1" placeholder="1"></label>
+        <label>Серия<input data-k="episode" type="number" min="1" placeholder="—"></label>
+      </div>
+      <div class="bar"><i></i></div>
+      <div class="status"></div>`;
+    it.el.querySelectorAll('input').forEach(inp => {
+      inp.value = it[inp.dataset.k] ?? '';
+      inp.oninput = () => { it[inp.dataset.k] = inp.value; };
+    });
+    $('queue').appendChild(it.el);
+  }
+  const pct = it.file.size ? 100 * it.sent / it.file.size : 0;
+  it.el.querySelector('.bar > i').style.width = pct.toFixed(1) + '%';
+  const st = it.el.querySelector('.status');
+  st.textContent = it.msg; st.className = 'status' + (it.state === 'done' ? ' ok' : it.state === 'error' ? ' err' : '');
+  it.el.querySelectorAll('input').forEach(inp => inp.disabled = it.state === 'up' || it.state === 'done');
+}
+
+function putChunk(it, blob, offset) {
+  return new Promise((resolve, reject) => {
+    const q = new URLSearchParams({ name: it.file.name, total: it.file.size, offset,
+      show: it.show || '', season: it.season || 0, episode: it.episode || 0 });
+    const x = new XMLHttpRequest();
+    x.open('PUT', '/api/upload/chunk?' + q);
+    x.setRequestHeader('Authorization', 'Bearer ' + password);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = e => { it.sent = offset + e.loaded; tick(it); };
+    x.onload = () => {
+      let body = {}; try { body = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status >= 200 && x.status < 300) resolve(body);
+      else reject(Object.assign(new Error(body.detail || ('Ошибка ' + x.status)), { status: x.status, body }));
+    };
+    x.onerror = () => reject(new Error('Нет связи с сервером'));
+    x.ontimeout = () => reject(new Error('Таймаут'));
+    x.send(blob);
+  });
+}
+
+function tick(it) {
+  const now = performance.now();
+  if (!it.t0) { it.t0 = now; it.s0 = it.sent; }
+  const dt = (now - it.t0) / 1000;
+  const speed = dt > 1 ? (it.sent - it.s0) / dt : 0;
+  it.msg = `Загружается: ${(100 * it.sent / it.file.size).toFixed(1)}%` + (speed ? ` · ${fmtBytes(speed)}/с` : '');
+  renderItem(it);
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function uploadItem(it) {
+  const f = it.file;
+  const q = new URLSearchParams({ name: f.name, total: f.size });
+  let offset = (await api('/api/upload/offset?' + q)).offset;
+  let retries = 0;
+  it.state = 'up'; it.t0 = 0;
+  while (true) {
+    const end = Math.min(offset + CHUNK, f.size);
+    try {
+      const res = await putChunk(it, f.slice(offset, end), offset);
+      offset = res.offset; retries = 0;
+      if (res.done) { it.state = 'done'; it.sent = f.size; it.msg = 'Готово → ' + res.path; renderItem(it); return; }
+    } catch (e) {
+      if (e.status === 409) { offset = e.body.offset; continue; }
+      if (e.status && e.status < 500) throw e;
+      if (++retries > 30) throw e;
+      it.msg = `${e.message}. Повтор через ${Math.min(30, 2 ** retries)} с…`; renderItem(it);
+      await sleep(Math.min(30, 2 ** retries) * 1000);
+      try { offset = (await api('/api/upload/offset?' + q)).offset; } catch (_) {}
+    }
+  }
+}
+
+async function runQueue() {
+  if (running) return; running = true; $('startBtn').disabled = true;
+  for (const it of queue) {
+    if (it.state === 'done') continue;
+    try { await uploadItem(it); }
+    catch (e) { it.state = 'error'; it.msg = 'Ошибка: ' + e.message; renderItem(it); }
+  }
+  running = false; $('startBtn').disabled = false;
+  loadLibrary();
+}
+
+$('startBtn').onclick = runQueue;
+$('clearBtn').onclick = () => {
+  for (let i = queue.length - 1; i >= 0; i--) if (queue[i].state === 'done') { queue[i].el.remove(); queue.splice(i, 1); }
+  $('queueActions').hidden = queue.length === 0;
+};
+$('fileInput').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
+const drop = $('drop');
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+window.addEventListener('beforeunload', e => { if (running) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---------- библиотека ----------
+const posterUrls = {};
+async function posterUrl(id) {
+  if (posterUrls[id] !== undefined) return posterUrls[id];
+  try {
+    const r = await fetch('/api/poster/' + id, { headers: { Authorization: 'Bearer ' + password } });
+    posterUrls[id] = r.ok ? URL.createObjectURL(await r.blob()) : '';
+  } catch (e) { posterUrls[id] = ''; }
+  return posterUrls[id];
+}
+
+async function loadLibrary() {
+  let d;
+  try { d = await api('/api/library'); } catch (e) { $('library').textContent = 'Не удалось загрузить: ' + e.message; return; }
+  setDisk(d.disk);
+  const box = $('library');
+  if (!d.shows.length) { box.textContent = 'Пока пусто.'; return; }
+  box.innerHTML = ''; box.classList.remove('muted');
+  for (const s of d.shows) {
+    const total = s.seasons.reduce((a, se) => a + se.episodes.reduce((b, e) => b + e.size, 0), 0);
+    const count = s.seasons.reduce((a, se) => a + se.episodes.length, 0);
+    const el = document.createElement('details'); el.className = 'show';
+    el.innerHTML = `<summary><img alt=""><div class="t"><b>${esc(s.title)}</b><div class="muted">${count} сер. · ${fmtBytes(total)}${s.folder !== s.title ? ' · папка «' + esc(s.folder) + '»' : ''}</div></div>
+      <button class="danger" data-del-show>Удалить сериал</button></summary>`;
+    for (const se of s.seasons) for (const e of se.episodes) {
+      const row = document.createElement('div'); row.className = 'ep';
+      row.innerHTML = `<span class="n">S${se.number}E${e.episode}</span><span class="title">${esc(e.title || '')}</span>
+        <span class="muted">${fmtBytes(e.size)}</span><button class="danger">Удалить</button>`;
+      row.querySelector('button').onclick = async () => {
+        if (!confirm(`Удалить S${se.number}E${e.episode} с сервера?`)) return;
+        try { await api('/api/file/' + e.id, { method: 'DELETE' }); loadLibrary(); } catch (err) { alert(err.message); }
+      };
+      el.appendChild(row);
+    }
+    el.querySelector('[data-del-show]').onclick = async ev => {
+      ev.preventDefault();
+      if (!confirm(`Удалить «${s.title}» целиком с сервера?`)) return;
+      try { await api('/api/show/' + s.id, { method: 'DELETE' }); loadLibrary(); } catch (err) { alert(err.message); }
+    };
+    box.appendChild(el);
+    if (s.hasPoster) posterUrl(s.id).then(u => { if (u) el.querySelector('img').src = u; });
+  }
+}
+$('refreshBtn').onclick = loadLibrary;
+
+if (password) enter(); else showLogin();
+</script>
+</body>
+</html>

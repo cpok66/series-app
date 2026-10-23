@@ -1,0 +1,23 @@
+name: Test server
+
+on:
+  push:
+    paths:
+      - "server/**"
+      - ".github/workflows/test-server.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -r server/requirements.txt
+      - name: Smoke test
+        run: python server/tests/test_smoke.py
+      - name: Docker build
+        run: docker build -t series-server server
