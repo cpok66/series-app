@@ -244,7 +244,7 @@ async function uploadItem(it) {
       if (res.done) { it.state = 'done'; it.sent = f.size; it.msg = 'Готово → ' + res.path; renderItem(it); return; }
     } catch (e) {
       if (e.status === 409) { offset = e.body.offset; continue; }
-      if (e.status && e.status < 500) throw e;
+      if (e.status && (e.status < 500 || e.status === 507)) throw e;
       if (++retries > 30) throw e;
       it.msg = `${e.message}. Повтор через ${Math.min(30, 2 ** retries)} с…`; renderItem(it);
       await sleep(Math.min(30, 2 ** retries) * 1000);

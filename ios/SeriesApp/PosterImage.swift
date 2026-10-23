@@ -16,7 +16,7 @@ actor PosterCache {
 
     func image(for showId: String) async -> UIImage? {
         if let img = memory[showId] { return img }
-        let file = dir.appendingPathComponent(showId + ".jpg")
+        let file = dir.appendingPathComponent(showId.fileSafeHash + ".jpg")
         if let data = try? Data(contentsOf: file), let img = UIImage(data: data) {
             memory[showId] = img
             return img

@@ -1,4 +1,13 @@
 import Foundation
+import CryptoKit
+
+extension String {
+    /// Короткое безопасное имя файла: id серии бывает длиннее лимита в 255 символов.
+    var fileSafeHash: String {
+        let digest = SHA256.hash(data: Data(utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(32))
+    }
+}
 
 struct Library: Codable {
     var shows: [Show]

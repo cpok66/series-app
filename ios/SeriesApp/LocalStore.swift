@@ -75,6 +75,18 @@ final class LocalStore: ObservableObject {
             changed = true
         }
         if changed { save() }
+
+        // Файлы, о которых ничего не известно (обрыв посреди сохранения), только зря занимают место.
+        let known = Set(downloaded.values.map(\.fileName))
+        let fm = FileManager.default
+        let files = (try? fm.contentsOfDirectory(at: Self.videosDir,
+                                                 includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        for file in files where !known.contains(file.lastPathComponent) {
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, Date().timeIntervalSince(modified) > 600 {
+                try? fm.removeItem(at: file)
+            }
+        }
     }
 
     // MARK: - Скачанные серии
@@ -87,7 +99,8 @@ final class LocalStore: ObservableObject {
 
     func addDownloaded(_ ep: DownloadedEpisode) {
         downloaded[ep.id] = ep
-        save()
+        // Сразу на диск: загрузка могла закончиться в фоне, и система вот-вот усыпит приложение.
+        saveNow()
     }
 
     func removeDownloaded(_ id: String) {

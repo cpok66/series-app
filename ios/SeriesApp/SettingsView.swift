@@ -47,6 +47,14 @@ struct SettingsView: View {
                     Toggle("Удалять серию после просмотра", isOn: $settings.deleteWatched)
                 }
 
+                Section {
+                    Toggle("Скачивать только по Wi-Fi", isOn: $settings.wifiOnly)
+                } header: {
+                    Text("Загрузки")
+                } footer: {
+                    Text("Действует на новые загрузки. По мобильному интернету серии в хорошем качестве съедают много трафика.")
+                }
+
                 Section("Память") {
                     LabeledContent("Скачано", value: Format.bytes(store.totalDownloadedSize))
                     LabeledContent("Свободно на телефоне", value: Format.bytes(Format.deviceFreeSpace()))

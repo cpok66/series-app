@@ -61,7 +61,8 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
         if let data = resumeData.removeValue(forKey: ep.id) {
             task = session.downloadTask(withResumeData: data)
         } else {
-            guard let req = try? APIClient.fileRequest(ep.id) else { return }
+            guard var req = try? APIClient.fileRequest(ep.id) else { return }
+            req.allowsCellularAccess = !AppSettings.shared.wifiOnly
             task = session.downloadTask(with: req)
         }
         task.taskDescription = Self.encode(ep)
@@ -125,7 +126,7 @@ final class DownloadManager: NSObject, ObservableObject, URLSessionDownloadDeleg
             }
             return
         }
-        let fileName = ep.id + "." + (ep.ext.isEmpty ? "mp4" : ep.ext)
+        let fileName = ep.id.fileSafeHash + "." + (ep.ext.isEmpty ? "mp4" : ep.ext)
         let dest = LocalStore.videosDir.appendingPathComponent(fileName)
         do {
             try? FileManager.default.removeItem(at: dest)

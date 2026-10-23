@@ -9,12 +9,14 @@ final class AppSettings: ObservableObject {
     @Published var password: String { didSet { defaults.set(password, forKey: "password") } }
     @Published var autoNext: Bool { didSet { defaults.set(autoNext, forKey: "autoNext") } }
     @Published var deleteWatched: Bool { didSet { defaults.set(deleteWatched, forKey: "deleteWatched") } }
+    @Published var wifiOnly: Bool { didSet { defaults.set(wifiOnly, forKey: "wifiOnly") } }
 
     private init() {
         serverURL = defaults.string(forKey: "serverURL") ?? ""
         password = defaults.string(forKey: "password") ?? ""
         autoNext = defaults.object(forKey: "autoNext") as? Bool ?? true
         deleteWatched = defaults.object(forKey: "deleteWatched") as? Bool ?? false
+        wifiOnly = defaults.object(forKey: "wifiOnly") as? Bool ?? false
     }
 
     var isConfigured: Bool { baseURL != nil && !password.isEmpty }
