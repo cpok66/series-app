@@ -10,6 +10,7 @@ final class AppSettings: ObservableObject {
     @Published var autoNext: Bool { didSet { defaults.set(autoNext, forKey: "autoNext") } }
     @Published var deleteWatched: Bool { didSet { defaults.set(deleteWatched, forKey: "deleteWatched") } }
     @Published var wifiOnly: Bool { didSet { defaults.set(wifiOnly, forKey: "wifiOnly") } }
+    @Published var deleteWatchedOnServer: Bool { didSet { defaults.set(deleteWatchedOnServer, forKey: "deleteWatchedOnServer") } }
 
     private init() {
         serverURL = defaults.string(forKey: "serverURL") ?? ""
@@ -17,6 +18,7 @@ final class AppSettings: ObservableObject {
         autoNext = defaults.object(forKey: "autoNext") as? Bool ?? true
         deleteWatched = defaults.object(forKey: "deleteWatched") as? Bool ?? false
         wifiOnly = defaults.object(forKey: "wifiOnly") as? Bool ?? false
+        deleteWatchedOnServer = defaults.object(forKey: "deleteWatchedOnServer") as? Bool ?? false
     }
 
     var isConfigured: Bool { baseURL != nil && !password.isEmpty }
@@ -78,6 +80,11 @@ enum APIClient {
 
     static func deleteOnServer(_ episodeId: String) async throws {
         let (_, response) = try await URLSession.shared.data(for: request("/api/file/\(episodeId)", method: "DELETE"))
+        try check(response)
+    }
+
+    static func deleteShow(_ showId: String) async throws {
+        let (_, response) = try await URLSession.shared.data(for: request("/api/show/\(showId)", method: "DELETE"))
         try check(response)
     }
 

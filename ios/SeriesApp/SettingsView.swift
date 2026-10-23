@@ -42,9 +42,14 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Просмотр") {
+                Section {
                     Toggle("Сразу включать следующую серию", isOn: $settings.autoNext)
-                    Toggle("Удалять серию после просмотра", isOn: $settings.deleteWatched)
+                    Toggle("После просмотра удалять с телефона", isOn: $settings.deleteWatched)
+                    Toggle("После просмотра удалять с сервера", isOn: $settings.deleteWatchedOnServer)
+                } header: {
+                    Text("Просмотр")
+                } footer: {
+                    Text("Серия считается просмотренной после 90%. Если в этот момент нет интернета, с сервера она удалится, когда связь появится.")
                 }
 
                 Section {

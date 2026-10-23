@@ -10,12 +10,14 @@ final class LocalStore: ObservableObject {
     @Published private(set) var playback: [String: PlaybackState] = [:]
     @Published private(set) var showPrefs: [String: ShowPrefs] = [:]
     @Published var cachedLibrary: Library?
+    @Published private(set) var pendingServerDeletes: [String] = []
 
     private struct State: Codable {
         var downloaded: [String: DownloadedEpisode] = [:]
         var playback: [String: PlaybackState] = [:]
         var showPrefs: [String: ShowPrefs] = [:]
         var cachedLibrary: Library?
+        var pendingServerDeletes: [String]?
     }
 
     static let videosDir: URL = {
@@ -50,6 +52,7 @@ final class LocalStore: ObservableObject {
         playback = state.playback
         showPrefs = state.showPrefs
         cachedLibrary = state.cachedLibrary
+        pendingServerDeletes = state.pendingServerDeletes ?? []
     }
 
     func save() {
@@ -62,7 +65,8 @@ final class LocalStore: ObservableObject {
     func saveNow() {
         pendingSave?.cancel()
         pendingSave = nil
-        let state = State(downloaded: downloaded, playback: playback, showPrefs: showPrefs, cachedLibrary: cachedLibrary)
+        let state = State(downloaded: downloaded, playback: playback, showPrefs: showPrefs,
+                          cachedLibrary: cachedLibrary, pendingServerDeletes: pendingServerDeletes)
         if let data = try? JSONEncoder().encode(state) {
             try? data.write(to: stateURL, options: .atomic)
         }
@@ -152,6 +156,36 @@ final class LocalStore: ObservableObject {
         if !watched { st.position = 0 }
         st.updatedAt = Date()
         playback[id] = st
+        save()
+    }
+
+    // MARK: - Удаление с сервера
+
+    /// Просмотренные серии из кеша библиотеки, которые ещё лежат на сервере.
+    func watchedOnServer(showId: String? = nil) -> [Episode] {
+        let all = cachedLibrary?.shows.filter { showId == nil || $0.id == showId }.flatMap(\.allEpisodes) ?? []
+        return all.filter { playback[$0.id]?.watched == true }
+    }
+
+    func queueServerDelete(_ ids: [String]) {
+        let new = ids.filter { !pendingServerDeletes.contains($0) }
+        guard !new.isEmpty else { return }
+        pendingServerDeletes += new
+        saveNow()
+    }
+
+    func serverDeleteDone(_ id: String) {
+        pendingServerDeletes.removeAll { $0 == id }
+        if var lib = cachedLibrary {
+            for i in lib.shows.indices {
+                for j in lib.shows[i].seasons.indices {
+                    lib.shows[i].seasons[j].episodes.removeAll { $0.id == id }
+                }
+                lib.shows[i].seasons.removeAll { $0.episodes.isEmpty }
+            }
+            lib.shows.removeAll { $0.seasons.isEmpty }
+            cachedLibrary = lib
+        }
         save()
     }
 

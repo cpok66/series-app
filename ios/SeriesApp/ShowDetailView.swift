@@ -11,6 +11,9 @@ struct ShowDetailView: View {
     @State private var showIntroSettings = false
     @State private var toDeleteOnServer: Episode?
     @State private var errorText: String?
+    @State private var confirmDeleteWatched = false
+    @State private var confirmDeleteShow = false
+    @Environment(\.dismiss) private var dismiss
 
     private var show: Show? {
         (library ?? store.cachedLibrary)?.shows.first { $0.id == showId }
@@ -85,8 +88,22 @@ struct ShowDetailView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button { showIntroSettings = true } label: {
-                            Image(systemName: "forward.end.alt")
+                        Menu {
+                            Button { showIntroSettings = true } label: {
+                                Label("Заставка", systemImage: "forward.end.alt")
+                            }
+                            let watched = store.watchedOnServer(showId: show.id)
+                            Section("Сервер") {
+                                Button(role: .destructive) { confirmDeleteWatched = true } label: {
+                                    Label("Удалить просмотренные (\(watched.count))", systemImage: "eye.slash")
+                                }
+                                .disabled(watched.isEmpty)
+                                Button(role: .destructive) { confirmDeleteShow = true } label: {
+                                    Label("Удалить сериал целиком", systemImage: "trash")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                         }
                     }
                 }
@@ -98,6 +115,34 @@ struct ShowDetailView: View {
             }
         }
         .refreshable { await reload() }
+        .confirmationDialog("Удалить просмотренные серии с сервера?", isPresented: $confirmDeleteWatched,
+                            titleVisibility: .visible) {
+            Button("Удалить", role: .destructive) {
+                let ids = store.watchedOnServer(showId: showId).map(\.id)
+                Task {
+                    await ServerCleanup.delete(ids)
+                    await reload()
+                }
+            }
+        } message: {
+            Text("На телефоне скачанные серии останутся.")
+        }
+        .confirmationDialog("Удалить весь сериал с сервера?", isPresented: $confirmDeleteShow,
+                            titleVisibility: .visible) {
+            Button("Удалить сериал", role: .destructive) {
+                Task {
+                    do {
+                        try await APIClient.deleteShow(showId)
+                        await reload()
+                        dismiss()
+                    } catch {
+                        errorText = error.localizedDescription
+                    }
+                }
+            }
+        } message: {
+            Text("Все серии будут удалены с сервера. На телефоне скачанные серии останутся.")
+        }
         .alert("Удалить с сервера?", isPresented: Binding(
             get: { toDeleteOnServer != nil },
             set: { if !$0 { toDeleteOnServer = nil } }),

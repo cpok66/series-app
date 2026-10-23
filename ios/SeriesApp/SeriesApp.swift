@@ -17,7 +17,11 @@ struct SeriesApp: App {
                 .tint(.orange)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { LocalStore.shared.saveNow() }
+            if phase == .active {
+                Task { await ServerCleanup.flush() }
+            } else {
+                LocalStore.shared.saveNow()
+            }
         }
     }
 }

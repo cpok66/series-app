@@ -4,6 +4,7 @@ struct DownloadsView: View {
     @EnvironmentObject var store: LocalStore
     @EnvironmentObject var downloads: DownloadManager
     @State private var confirmDeleteWatched = false
+    @State private var confirmDeleteServer = false
 
     var body: some View {
         NavigationStack {
@@ -65,8 +66,14 @@ struct DownloadsView: View {
                         Button(role: .destructive) {
                             confirmDeleteWatched = true
                         } label: {
-                            Label("Удалить просмотренные", systemImage: "trash")
+                            Label("Удалить просмотренные с телефона", systemImage: "iphone.slash")
                         }
+                        Button(role: .destructive) {
+                            confirmDeleteServer = true
+                        } label: {
+                            Label("Удалить просмотренные с сервера", systemImage: "server.rack")
+                        }
+                        .disabled(store.watchedOnServer().isEmpty)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -76,6 +83,16 @@ struct DownloadsView: View {
                                 isPresented: $confirmDeleteWatched,
                                 titleVisibility: .visible) {
                 Button("Удалить", role: .destructive) { store.removeWatched() }
+            }
+            .confirmationDialog("Удалить с сервера все просмотренные серии (\(store.watchedOnServer().count))?",
+                                isPresented: $confirmDeleteServer,
+                                titleVisibility: .visible) {
+                Button("Удалить", role: .destructive) {
+                    let ids = store.watchedOnServer().map(\.id)
+                    Task { await ServerCleanup.delete(ids) }
+                }
+            } message: {
+                Text("Освободит место на сервере. На телефоне скачанное останется.")
             }
         }
     }

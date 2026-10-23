@@ -525,6 +525,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate,
         statusObservation = nil
         rateObservation = nil
         let toDelete = AppSettings.shared.deleteWatched ? watchedThisSession : []
+        if AppSettings.shared.deleteWatchedOnServer, !watchedThisSession.isEmpty {
+            let ids = Array(watchedThisSession)
+            Task { await ServerCleanup.delete(ids) }
+        }
         LocalStore.shared.saveNow()
         dismiss(animated: true) {
             toDelete.forEach { LocalStore.shared.removeDownloaded($0) }
