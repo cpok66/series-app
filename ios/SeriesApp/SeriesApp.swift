@@ -47,6 +47,8 @@ struct RootView: View {
         TabView {
             LibraryView()
                 .tabItem { Label("Сериалы", systemImage: "film.stack") }
+            ArchiveView()
+                .tabItem { Label("Архив", systemImage: "building.columns") }
             DownloadsView()
                 .tabItem { Label("Скачано", systemImage: "arrow.down.circle") }
             SettingsView()

@@ -439,3 +439,289 @@ def upload_cancel(name: str, total: int):
     if p.exists():
         p.unlink()
     return {"ok": True}
+
+
+# ---------- Internet Archive: свободные фильмы и сериалы ----------
+
+import html as _html
+import queue as _queue
+import uuid as _uuid
+from urllib.parse import quote as _quote
+
+from pydantic import BaseModel
+
+ARCHIVE = "https://archive.org"
+# Коллекции архива с фильмами и передачами, которые можно свободно смотреть и скачивать
+ARCHIVE_COLLECTIONS = [
+    "feature_films", "classic_tv", "classic_cartoons", "silent_films",
+    "film_noir", "sci-fi_horror", "comedy_films", "prelinger",
+]
+ARCHIVE_VIDEO_EXT = {".mp4", ".m4v", ".mov"}
+ARCHIVE_ID = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+(CACHE / "archive").mkdir(parents=True, exist_ok=True)
+
+
+def _archive_get(path: str, params=None) -> httpx.Response:
+    """Все запросы к архиву идут через эту функцию (в тестах её подменяют)."""
+    r = httpx.get(ARCHIVE + path, params=params, timeout=25, follow_redirects=True)
+    r.raise_for_status()
+    return r
+
+
+def _archive_stream(path: str):
+    client = httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0, read=120.0))
+    return client, client.stream("GET", ARCHIVE + path)
+
+
+def _plain(value, limit: int) -> str:
+    if isinstance(value, list):
+        value = " ".join(str(v) for v in value)
+    s = re.sub(r"<[^>]+>", " ", str(value or ""))
+    s = _html.unescape(s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:limit]
+
+
+def _first(value):
+    return value[0] if isinstance(value, list) and value else value
+
+
+def _parse_length(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        parts = [float(p) for p in str(value).split(":")]
+        total = 0.0
+        for p in parts:
+            total = total * 60 + p
+        return total
+    except ValueError:
+        return None
+
+
+def _check_id(identifier: str):
+    if not ARCHIVE_ID.match(identifier or ""):
+        raise HTTPException(404, "Не найдено")
+
+
+@app.get("/api/archive/search", dependencies=[Depends(auth)])
+def archive_search(q: str, page: int = 1):
+    words = re.sub(r'[\\":(){}\[\]^~*?!/+\-&|]', " ", q).split()
+    if not words:
+        raise HTTPException(400, "Пустой запрос")
+    query = (f"({' '.join(words)}) AND mediatype:(movies) AND "
+             f"collection:({' OR '.join(ARCHIVE_COLLECTIONS)})")
+    params = [("q", query), ("rows", "40"), ("page", str(max(1, page))), ("output", "json"),
+              ("sort[]", "downloads desc")]
+    params += [("fl[]", f) for f in ("identifier", "title", "year", "description", "downloads")]
+    try:
+        data = _archive_get("/advancedsearch.php", params).json()
+    except Exception as ex:
+        raise HTTPException(502, f"Архив недоступен: {ex}")
+    resp = data.get("response") or {}
+    items = []
+    for d in resp.get("docs", []):
+        ident = d.get("identifier")
+        if not ident or not ARCHIVE_ID.match(ident):
+            continue
+        year = str(_first(d.get("year")) or "")[:4]
+        items.append({
+            "id": ident,
+            "title": _plain(_first(d.get("title")), 200) or ident,
+            "year": year or None,
+            "description": _plain(d.get("description"), 300) or None,
+            "downloads": d.get("downloads"),
+        })
+    return {"items": items, "total": resp.get("numFound", 0)}
+
+
+@app.get("/api/archive/item/{identifier}", dependencies=[Depends(auth)])
+def archive_item(identifier: str):
+    _check_id(identifier)
+    try:
+        data = _archive_get(f"/metadata/{identifier}").json()
+    except Exception as ex:
+        raise HTTPException(502, f"Архив недоступен: {ex}")
+    md = data.get("metadata") or {}
+    if not md:
+        raise HTTPException(404, "Не найдено")
+    files = []
+    for f in data.get("files", []):
+        name = f.get("name") or ""
+        if Path(name).suffix.lower() not in ARCHIVE_VIDEO_EXT:
+            continue
+        try:
+            size = int(f.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        files.append({"name": name, "format": f.get("format") or "", "size": size,
+                      "length": _parse_length(f.get("length"))})
+    files.sort(key=lambda x: x["name"].lower())
+    year = str(_first(md.get("year")) or _first(md.get("date")) or "")[:4]
+    return {
+        "id": identifier,
+        "title": _plain(_first(md.get("title")), 200) or identifier,
+        "description": _plain(md.get("description"), 1500) or None,
+        "year": year or None,
+        "files": files,
+    }
+
+
+def _archive_thumb_path(identifier: str) -> Optional[Path]:
+    p = CACHE / "archive" / f"{identifier}.jpg"
+    if not p.exists():
+        try:
+            p.write_bytes(_archive_get(f"/services/img/{identifier}").content)
+        except Exception:
+            return None
+    return p
+
+
+@app.get("/api/archive/thumb/{identifier}", dependencies=[Depends(auth)])
+def archive_thumb(identifier: str):
+    _check_id(identifier)
+    p = _archive_thumb_path(identifier)
+    if not p:
+        raise HTTPException(404, "Нет обложки")
+    return FileResponse(p, media_type="image/jpeg")
+
+
+# --- очередь загрузок с архива на сервер ---
+
+_jobs: dict = {}
+_job_queue: "_queue.Queue[str]" = _queue.Queue()
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _public(job: dict) -> dict:
+    return {k: job[k] for k in ("id", "identifier", "title", "file", "episode", "received", "total", "state", "error")}
+
+
+def _save_archive_meta(folder: str, job: dict):
+    k = key(folder)
+    mf = CACHE / "meta" / f"{k}.json"
+    meta = load_meta(folder) if mf.exists() else {"tmdbId": None, "name": job["title"],
+                                                  "overview": job["description"], "episodes": {}}
+    if len(job["siblings"]) > 1:
+        meta.setdefault("episodes", {})[f"1-{job['episode']}"] = clean_title(Path(job["file"]).stem)
+    mf.write_text(json.dumps(meta, ensure_ascii=False))
+    poster = CACHE / "posters" / f"{k}.jpg"
+    if not poster.exists():
+        thumb = _archive_thumb_path(job["identifier"])
+        if thumb:
+            shutil.copy(thumb, poster)
+
+
+def _run_job(job: dict):
+    job["state"] = "downloading"
+    part = UPLOADS / f"archive-{job['id']}.part"
+    client = None
+    try:
+        client, stream = _archive_stream(f"/download/{job['identifier']}/{_quote(job['file'])}")
+        with stream as r:
+            r.raise_for_status()
+            length = int(r.headers.get("content-length") or 0)
+            if length:
+                job["total"] = length
+            with open(part, "wb") as f:
+                for chunk in r.iter_bytes(1024 * 1024):
+                    if job["cancel"]:
+                        raise _Cancelled()
+                    f.write(chunk)
+                    job["received"] += len(chunk)
+        dest = place(Path(job["file"]).name, job["title"], 1, job["episode"])
+        shutil.move(str(part), dest)
+        _save_archive_meta(dest.parent.parent.name, job)
+        job["state"] = "done"
+    except _Cancelled:
+        job["state"] = "cancelled"
+    except Exception as ex:
+        job["state"] = "error"
+        job["error"] = str(ex)[:200]
+    finally:
+        job["finishedAt"] = time.time()
+        if client:
+            client.close()
+        if part.exists():
+            part.unlink()
+
+
+def _job_worker():
+    while True:
+        job = _jobs.get(_job_queue.get())
+        if job and job["state"] == "queued":
+            _run_job(job)
+
+
+threading.Thread(target=_job_worker, daemon=True).start()
+
+
+class ArchiveDownload(BaseModel):
+    identifier: str
+    title: str
+    files: list[str]
+    sizes: list[int] = []
+    description: str = ""
+
+
+@app.post("/api/archive/download", dependencies=[Depends(auth)])
+def archive_download(req: ArchiveDownload):
+    _check_id(req.identifier)
+    files = [f for f in req.files if f and ".." not in f and Path(f).suffix.lower() in ARCHIVE_VIDEO_EXT]
+    if not files:
+        raise HTTPException(400, "Не выбраны видеофайлы")
+    need = sum(req.sizes) if req.sizes else 0
+    if need and shutil.disk_usage(UPLOADS).free < need + 300 * 1024 * 1024:
+        raise HTTPException(507, f"На сервере не хватает места: нужно {need // 1024 ** 2} МБ")
+    title = sanitize(req.title) or req.identifier
+    show_dir = MEDIA / title
+    start = 1
+    if show_dir.is_dir():
+        numbers = [e for s, e, _ in collect_files(show_dir) if s == 1 and e]
+        start = max(numbers, default=0) + 1
+    created = []
+    for i, name in enumerate(files):
+        jid = _uuid.uuid4().hex[:12]
+        job = {
+            "id": jid, "identifier": req.identifier, "title": title, "file": name,
+            "episode": start + i, "received": 0,
+            "total": req.sizes[i] if i < len(req.sizes) else 0,
+            "state": "queued", "error": None, "cancel": False,
+            "description": _plain(req.description, 1500), "siblings": files,
+            "createdAt": time.time(), "finishedAt": None,
+        }
+        _jobs[jid] = job
+        _job_queue.put(jid)
+        created.append(_public(job))
+    return {"jobs": created}
+
+
+@app.get("/api/archive/jobs", dependencies=[Depends(auth)])
+def archive_jobs():
+    hour_ago = time.time() - 3600
+    for jid in [j for j, job in _jobs.items() if job["finishedAt"] and job["finishedAt"] < hour_ago]:
+        _jobs.pop(jid, None)
+    jobs = sorted(_jobs.values(), key=lambda j: j["createdAt"])
+    return {"jobs": [_public(j) for j in jobs]}
+
+
+@app.delete("/api/archive/jobs/{job_id}", dependencies=[Depends(auth)])
+def archive_cancel(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Нет такой загрузки")
+    if job["state"] == "queued":
+        job["state"] = "cancelled"
+        job["finishedAt"] = time.time()
+    elif job["state"] == "downloading":
+        job["cancel"] = True
+    else:
+        _jobs.pop(job_id, None)
+    return {"ok": True}

@@ -57,6 +57,9 @@ struct LibraryView: View {
             .navigationDestination(for: String.self) { id in
                 ShowDetailView(showId: id, library: $library, reload: { await load() })
             }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryChanged)) { _ in
+                Task { await load() }
+            }
             .task(id: settings.serverURL + settings.password) {
                 // Не дёргаем сервер на каждую букву, пока адрес или пароль печатаются.
                 try? await Task.sleep(nanoseconds: 500_000_000)
