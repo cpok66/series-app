@@ -30,9 +30,10 @@
   .disk { min-width: 220px; }
   .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
   .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
-  .drop { margin-top: 20px; border: 2px dashed var(--line); border-radius: 14px; padding: 36px 16px;
+  .drop { position: relative; margin-top: 20px; border: 2px dashed var(--line); border-radius: 14px; padding: 36px 16px;
           text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
   .drop.over { border-color: var(--accent); background: rgba(255,122,61,.06); }
+  .drop input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
   .drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
   .queue { display: grid; gap: 10px; margin-top: 14px; }
   .item { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
@@ -85,10 +86,11 @@
 
     <label class="drop" id="drop">
       <strong>Перетащи сюда файлы серий</strong>
-      <span class="muted">или нажми, чтобы выбрать. Подходят mp4, m4v, mov, mkv</span>
-      <input id="fileInput" type="file" multiple accept=".mp4,.m4v,.mov,.mkv,video/*" hidden>
+      <span class="muted">или нажми, чтобы выбрать (на телефоне — из «Файлов» или «Фото»). Подходят mp4, m4v, mov, mkv</span>
+      <input id="fileInput" type="file" multiple accept="video/*,.mp4,.m4v,.mov,.mkv">
     </label>
 
+    <p id="skipMsg" class="status err"></p>
     <div class="queue" id="queue"></div>
     <div class="actions" id="queueActions" hidden>
       <button class="primary" id="startBtn">Загрузить всё</button>
@@ -164,13 +166,23 @@ function parseName(name) {
 }
 
 // ---------- очередь ----------
+const EXT_BY_TYPE = { 'video/quicktime': '.mov', 'video/mp4': '.mp4', 'video/x-m4v': '.m4v', 'video/x-matroska': '.mkv' };
 function addFiles(files) {
+  const skipped = [];
   for (const f of files) {
-    if (!/\.(mp4|m4v|mov|mkv)$/i.test(f.name)) continue;
-    const p = parseName(f.name);
-    const it = { file: f, show: p.show, season: p.season, episode: p.episode, sent: 0, state: 'wait', msg: 'Ждёт загрузки' };
+    let name = f.name || 'video';
+    if (!/\.(mp4|m4v|mov|mkv)$/i.test(name)) {
+      // iOS иногда отдаёт видео из «Фото» без привычного расширения
+      const ext = EXT_BY_TYPE[(f.type || '').toLowerCase()];
+      if (!ext) { skipped.push(name); continue; }
+      name = name.replace(/\.[^.]*$/, '') + ext;
+    }
+    const p = parseName(name);
+    const it = { file: f, name, show: p.show, season: p.season, episode: p.episode, sent: 0, state: 'wait', msg: 'Ждёт загрузки' };
     queue.push(it); renderItem(it);
   }
+  $('skipMsg').textContent = skipped.length
+    ? 'Не подходит формат: ' + skipped.join(', ') + '. Нужны mp4, m4v, mov или mkv.' : '';
   $('queueActions').hidden = queue.length === 0;
 }
 
@@ -178,7 +190,7 @@ function renderItem(it) {
   if (!it.el) {
     it.el = document.createElement('div'); it.el.className = 'item';
     it.el.innerHTML = `
-      <div class="top"><div class="name">${esc(it.file.name)}</div><div class="muted">${fmtBytes(it.file.size)}</div></div>
+      <div class="top"><div class="name">${esc(it.name)}</div><div class="muted">${fmtBytes(it.file.size)}</div></div>
       <div class="fields">
         <label>Сериал<input data-k="show" placeholder="Название"></label>
         <label>Сезон<input data-k="season" type="number" min="1" placeholder="1"></label>
@@ -201,7 +213,7 @@ function renderItem(it) {
 
 function putChunk(it, blob, offset) {
   return new Promise((resolve, reject) => {
-    const q = new URLSearchParams({ name: it.file.name, total: it.file.size, offset,
+    const q = new URLSearchParams({ name: it.name, total: it.file.size, offset,
       show: it.show || '', season: it.season || 0, episode: it.episode || 0 });
     const x = new XMLHttpRequest();
     x.open('PUT', '/api/upload/chunk?' + q);
@@ -232,7 +244,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function uploadItem(it) {
   const f = it.file;
-  const q = new URLSearchParams({ name: f.name, total: f.size });
+  const q = new URLSearchParams({ name: it.name, total: f.size });
   let offset = (await api('/api/upload/offset?' + q)).offset;
   let retries = 0;
   it.state = 'up'; it.t0 = 0;
